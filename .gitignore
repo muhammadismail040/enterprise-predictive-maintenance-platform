@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+mlflow.db
+frontend/node_modules/
+src/static/assets/
