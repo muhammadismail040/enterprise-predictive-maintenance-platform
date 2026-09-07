@@ -28,6 +28,8 @@ button {
 }
 
 button:hover { background: #3e7cf5; }
+.delete-button { padding: 6px 10px; color: #ffb4b4; background: rgba(255, 107, 107, 0.16); font-size: 0.78rem; }
+.delete-button:hover { background: rgba(255, 107, 107, 0.3); }
 
 select {
   padding: 10px 12px;
@@ -136,10 +138,21 @@ h2 { margin-bottom: 0; font-size: 1.25rem; }
 .detail { display: flex; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid rgba(155, 179, 201, 0.18); }
 .detail dt { color: #9bb3c9; }
 .detail dd { margin: 0; text-align: right; font-weight: 700; }
+.manual-layout { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 24px; margin-top: 24px; }
+.manual-form { display: grid; gap: 12px; margin-top: 18px; }
+.manual-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.field { display: grid; gap: 5px; color: #edf6ff; font-size: 0.9rem; }
+.field input { width: 100%; padding: 9px 10px; border: 1px solid rgba(155, 179, 201, 0.25); border-radius: 7px; color: #edf6ff; background: #0a1729; }
+.field small { color: #9bb3c9; font-size: 0.72rem; }
+.inline-error { margin: 0; padding: 9px 11px; border-radius: 7px; color: #ffb4b4; background: rgba(255, 107, 107, 0.14); }
+.manual-actions { display: flex; align-items: center; gap: 12px; }
+.saved-confirmation { color: #4ecdc4; font-size: 0.85rem; font-weight: 700; }
+.history-panel { margin-top: 24px; }
 .error-banner { margin-bottom: 20px; padding: 12px 14px; border-radius: 8px; color: #ffb4b4; background: rgba(255, 107, 107, 0.14); }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
 
 @media (max-width: 840px) {
-  .grid, .layout { grid-template-columns: 1fr; }
+  .grid, .layout, .manual-layout { grid-template-columns: 1fr; }
+  .manual-fields { grid-template-columns: 1fr; }
   .section-heading { align-items: flex-start; flex-direction: column; }
 }

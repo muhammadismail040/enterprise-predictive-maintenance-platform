@@ -5,19 +5,19 @@ import "./styles.css";
 const DASHBOARD_POLL_INTERVAL_MS = 30_000;
 const DASHBOARD_STALE_AFTER_MS = 90_000;
 
-const sensorSample = {
-  temperature: 80,
-  pressure: 125,
-  vibration: 5.9,
-  rpm: 1800,
-  voltage: 240,
-  current: 24,
-  humidity: 52,
-  load: 68,
-  maintenance_history: 3,
-  failure_log: 1,
-  operating_hours: 5400,
-};
+const manualFields = [
+  { name: "temperature", label: "Temperature", unit: "°C", min: 20, max: 150 },
+  { name: "pressure", label: "Pressure", unit: "PSI", min: 40, max: 160 },
+  { name: "vibration", label: "Vibration", unit: "mm/s", min: 0, max: 25 },
+  { name: "rpm", label: "RPM", unit: "rev/min", min: 500, max: 3000 },
+  { name: "voltage", label: "Voltage", unit: "V", min: 150, max: 260 },
+  { name: "current", label: "Current", unit: "A", min: 0, max: 180 },
+  { name: "humidity", label: "Humidity", unit: "%", min: 0, max: 100 },
+  { name: "load", label: "Load", unit: "%", min: 0, max: 100 },
+  { name: "maintenance_history", label: "Maintenance history", unit: "days", min: 0, max: 365 },
+  { name: "failure_log", label: "Failure log", unit: "events", min: 0, max: 1, step: 1 },
+  { name: "operating_hours", label: "Operating hours", unit: "hours", min: 0, max: 25000 },
+];
 
 function riskClass(risk) {
   if (risk >= 0.75) return "critical";
@@ -33,18 +33,23 @@ function riskLabel(risk) {
 
 function App() {
   const [machines, setMachines] = useState([]);
-  const [selectedMachine, setSelectedMachine] = useState("");
   const [dashboard, setDashboard] = useState({
     average_health_score: 0,
     critically_at_risk: 0,
     maintenance_recommendations: {},
   });
-  const [prediction, setPrediction] = useState(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [connectionStatus, setConnectionStatus] = useState("connecting");
   const [lastUpdatedAt, setLastUpdatedAt] = useState(null);
   const [currentTime, setCurrentTime] = useState(() => Date.now());
+  const [manualMachine, setManualMachine] = useState("");
+  const [manualForm, setManualForm] = useState({});
+  const [manualPrediction, setManualPrediction] = useState(null);
+  const [manualError, setManualError] = useState("");
+  const [manualLoading, setManualLoading] = useState(false);
+  const [manualSaved, setManualSaved] = useState(false);
+  const [history, setHistory] = useState([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -63,7 +68,7 @@ function App() {
         const machineList = machinesPayload.machines || [];
         if (cancelled) return;
         setMachines(machineList);
-        setSelectedMachine(machineList[0] || "");
+        setManualMachine(machineList[0] || "");
         setDashboard(dashboardPayload);
         setLastUpdatedAt(Date.now());
         setConnectionStatus("connected");
@@ -104,38 +109,128 @@ function App() {
     };
   }, []);
 
-  const predictionRisk = prediction
-    ? Number(prediction.failure_probability ?? prediction.risk_score ?? 0)
-    : 0;
-  const predictionStatus = riskLabel(predictionRisk);
-  const recommendation =
-    predictionRisk >= 0.75
-      ? "Immediate Repair"
-      : predictionRisk >= 0.5
-        ? "Scheduled Maintenance"
-        : "Continue Monitoring";
+  useEffect(() => {
+    if (!manualMachine) return;
+    let cancelled = false;
 
-  async function runPrediction() {
-    if (!selectedMachine) return;
-    setError("");
+    async function loadManualDefaults() {
+      setManualLoading(true);
+      setManualError("");
+      try {
+        const response = await fetch(
+          `/machines/${encodeURIComponent(manualMachine)}/sensor-defaults`,
+        );
+        if (!response.ok) throw new Error("Unable to load machine sensor defaults.");
+        const defaults = await response.json();
+        if (!cancelled) setManualForm(defaults);
+      } catch (defaultsError) {
+        if (!cancelled) setManualError(defaultsError.message);
+      } finally {
+        if (!cancelled) setManualLoading(false);
+      }
+    }
+
+    loadManualDefaults();
+    return () => {
+      cancelled = true;
+    };
+  }, [manualMachine]);
+
+  useEffect(() => {
+    async function loadHistory() {
+      const response = await fetch("/predictions/history");
+      if (response.ok) {
+        const payload = await response.json();
+        setHistory(payload.predictions || []);
+      }
+    }
+    loadHistory();
+  }, []);
+
+  async function runManualPrediction(event) {
+    event.preventDefault();
+    setManualError("");
+    setManualSaved(false);
+    const invalidField = manualFields.find(
+      (field) =>
+        manualForm[field.name] === undefined ||
+        manualForm[field.name] === "" ||
+        !Number.isFinite(Number(manualForm[field.name])),
+    );
+    if (invalidField) {
+      setManualError(`${invalidField.label} must be a numeric value.`);
+      return;
+    }
+
     try {
+      const sensorData = Object.fromEntries(
+        manualFields.map((field) => [
+          field.name,
+          field.name === "failure_log"
+            ? Number.parseInt(manualForm[field.name], 10)
+            : Number(manualForm[field.name]),
+        ]),
+      );
       const response = await fetch("/predict", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          machine_id: selectedMachine,
-          sensor_data: [sensorSample],
+          machine_id: manualMachine,
+          sensor_data: [sensorData],
+          save_to_history: true,
         }),
       });
-      if (!response.ok) throw new Error("Prediction request failed.");
-      setPrediction(await response.json());
+      if (!response.ok) throw new Error("Manual prediction request failed.");
+      const payload = await response.json();
+      setManualPrediction(payload);
+      setManualSaved(Boolean(payload.history));
+      const historyResponse = await fetch("/predictions/history");
+      if (historyResponse.ok) {
+        const historyPayload = await historyResponse.json();
+        setHistory(historyPayload.predictions || []);
+      }
+       const dashboardResponse = await fetch("/dashboard");
+       if (!dashboardResponse.ok) throw new Error("Dashboard refresh failed.");
+       setDashboard(await dashboardResponse.json());
+       setLastUpdatedAt(Date.now());
+       setConnectionStatus("connected");
     } catch (predictionError) {
-      setError(predictionError.message);
+      setManualError(predictionError.message);
+    }
+  }
+
+  async function deleteHistoryRecord(predictionId) {
+    if (!window.confirm("Delete this prediction history record?")) return;
+    setManualError("");
+    try {
+      const response = await fetch(`/predictions/history/${predictionId}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || "Unable to delete prediction history record.");
+      }
+      const historyResponse = await fetch("/predictions/history");
+      if (!historyResponse.ok) throw new Error("Unable to refresh prediction history.");
+      const historyPayload = await historyResponse.json();
+      setHistory(historyPayload.predictions || []);
+      const dashboardResponse = await fetch("/dashboard");
+      if (!dashboardResponse.ok) throw new Error("Dashboard refresh failed.");
+      setDashboard(await dashboardResponse.json());
+      setLastUpdatedAt(Date.now());
+      setConnectionStatus("connected");
+    } catch (deleteError) {
+      setManualError(deleteError.message);
     }
   }
 
   const queueSize = useMemo(
-    () => Object.keys(dashboard.maintenance_recommendations || {}).length,
+    () =>
+      Object.entries(dashboard.maintenance_recommendations || {}).reduce(
+        (total, [action, count]) =>
+          action === "Continue Monitoring" ? total : total + Number(count),
+        0,
+      ),
     [dashboard.maintenance_recommendations],
   );
   const isStale =
@@ -176,106 +271,102 @@ function App() {
       <section className="grid metrics" aria-label="Fleet metrics">
         <MetricCard
           label="Fleet Health"
-          value={`${Number(dashboard.average_health_score || 0).toFixed(1)}%`}
+          value={`${Number(
+            dashboard.fleet_health_percent ?? dashboard.average_health_score ?? 0,
+          ).toFixed(1)}%`}
         />
         <MetricCard
           label="Critical Assets"
-          value={String(dashboard.critically_at_risk || 0)}
+          value={String(dashboard.critical_assets ?? dashboard.critically_at_risk ?? 0)}
         />
-        <MetricCard label="Maintenance Queue" value={String(queueSize)} />
+        <MetricCard
+          label="Maintenance Queue"
+          value={String(dashboard.maintenance_queue ?? queueSize)}
+        />
       </section>
 
-      <section className="layout">
+      <section className="manual-layout">
         <section className="card">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">Asset inventory</p>
-              <h2>Machine Overview</h2>
+          <p className="eyebrow">Ad-hoc sensor input</p>
+          <h2>Manual Risk Check</h2>
+          <form className="manual-form" onSubmit={runManualPrediction} noValidate>
+            <label htmlFor="manual-machine">Machine defaults</label>
+            <select
+              id="manual-machine"
+              value={manualMachine}
+              onChange={(event) => setManualMachine(event.target.value)}
+            >
+              {machines.map((machine) => (
+                <option key={machine} value={machine}>{machine}</option>
+              ))}
+            </select>
+            {manualLoading && <p className="muted">Loading current sensor values...</p>}
+            <div className="manual-fields">
+              {manualFields.map((field) => (
+                <label key={field.name} className="field">
+                  <span>{field.label} ({field.unit})</span>
+                  <input
+                    type="number"
+                    name={field.name}
+                    value={manualForm[field.name] ?? ""}
+                    min={field.min}
+                    max={field.max}
+                    step={field.step || "any"}
+                    placeholder={`${field.min}-${field.max}`}
+                    onChange={(event) =>
+                      setManualForm((current) => ({
+                        ...current,
+                        [field.name]: event.target.value,
+                      }))
+                    }
+                  />
+                  <small>Typical range: {field.min}-{field.max}</small>
+                </label>
+              ))}
             </div>
-            <div className="controls">
-              <label htmlFor="machine-selector" className="sr-only">
-                Select machine
-              </label>
-              <select
-                id="machine-selector"
-                value={selectedMachine}
-                onChange={(event) => setSelectedMachine(event.target.value)}
-              >
-                {machines.map((machine) => (
-                  <option key={machine} value={machine}>
-                    {machine}
-                  </option>
-                ))}
-              </select>
-              <button type="button" onClick={runPrediction}>
-                Run Prediction
-              </button>
+            {manualError && <p className="inline-error">{manualError}</p>}
+            <div className="manual-actions">
+              <button type="submit" disabled={manualLoading}>Predict</button>
+              {manualSaved && <span className="saved-confirmation">Saved to history</span>}
             </div>
-          </div>
+          </form>
+        </section>
+        <PredictionDetails
+          prediction={manualPrediction}
+          emptyMessage="Submit the edited sensor values to see a manual risk result."
+        />
+      </section>
+      <section className="card history-panel">
+        <p className="eyebrow">Audit trail</p>
+        <h2>Prediction History</h2>
+        {history.length ? (
           <div className="table-wrapper">
             <table className="machine-list">
               <thead>
-                <tr>
-                  <th>Machine</th>
-                  <th>Status</th>
-                  <th>Risk</th>
-                  <th>Action</th>
-                </tr>
+                <tr><th>Machine</th><th>Status</th><th>Risk</th><th>Timestamp</th><th>Action</th></tr>
               </thead>
               <tbody>
-                {machines.map((machine) => {
-                  const machineRisk =
-                    prediction?.machine_id === machine ? predictionRisk : 0;
-                  return (
-                    <tr key={machine}>
-                      <td>{machine}</td>
-                      <td>
-                        <span className={`pill ${riskClass(machineRisk)}`}>
-                          {riskLabel(machineRisk)}
-                        </span>
-                      </td>
-                      <td>{machineRisk ? machineRisk.toFixed(3) : "Low"}</td>
-                      <td>
-                        {prediction?.machine_id === machine
-                          ? recommendation
-                          : "Continue Monitoring"}
-                      </td>
-                    </tr>
-                  );
-                })}
+                {history.map((item) => (
+                  <tr key={item.id}>
+                    <td>{item.machine_id}</td>
+                    <td><span className={`pill ${riskClass(Number(item.risk_score))}`}>{item.predicted_status}</span></td>
+                    <td>{Number(item.risk_score).toFixed(3)}</td>
+                    <td>{new Date(item.created_at).toLocaleString()}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="delete-button"
+                        onClick={() => deleteHistoryRecord(item.id)}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
-        </section>
-
-        <section className="card prediction-card">
-          <p className="eyebrow">Model output</p>
-          <h2>Prediction Details</h2>
-          {prediction ? (
-            <dl className="details">
-              <Detail label="Machine" value={prediction.machine_id} />
-              <Detail label="Status" value={predictionStatus} />
-              <Detail label="Risk" value={predictionRisk.toFixed(3)} />
-              <Detail
-                label="Health"
-                value={`${Number(prediction.health_score ?? 0).toFixed(1)}%`}
-              />
-              <Detail label="Recommendation" value={recommendation} />
-              <Detail
-                label="Top risk factors"
-                value={
-                  (prediction.top_risk_factors || [])
-                    .map((factor) => factor.feature)
-                    .join(", ") || "N/A"
-                }
-              />
-            </dl>
-          ) : (
-            <p className="muted">
-              Select a machine and run a prediction to inspect model output.
-            </p>
-          )}
-        </section>
+        ) : <p className="muted">No saved manual predictions yet.</p>}
       </section>
     </main>
   );
@@ -296,6 +387,39 @@ function Detail({ label, value }) {
       <dt>{label}</dt>
       <dd>{value}</dd>
     </div>
+  );
+}
+
+function PredictionDetails({ prediction, emptyMessage }) {
+  const risk = prediction
+    ? Number(prediction.failure_probability ?? prediction.risk_score ?? 0)
+    : 0;
+  const recommendation = risk >= 0.75
+    ? "Immediate Repair"
+    : risk >= 0.5
+      ? "Scheduled Maintenance"
+      : "Continue Monitoring";
+
+  return (
+    <section className="card prediction-card">
+      <p className="eyebrow">Model output</p>
+      <h2>Prediction Details</h2>
+      {prediction ? (
+        <dl className="details">
+          <Detail label="Machine" value={prediction.machine_id} />
+          <Detail label="Status" value={riskLabel(risk)} />
+          <Detail label="Risk" value={risk.toFixed(3)} />
+          <Detail label="Health" value={`${Number(prediction.health_score ?? 0).toFixed(1)}%`} />
+          <Detail label="Recommendation" value={recommendation} />
+          <Detail
+            label="Top risk factors"
+            value={(prediction.top_risk_factors || []).map((factor) => factor.feature).join(", ") || "N/A"}
+          />
+        </dl>
+      ) : (
+        <p className="muted">{emptyMessage}</p>
+      )}
+    </section>
   );
 }
 

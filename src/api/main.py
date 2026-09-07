@@ -8,8 +8,14 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from src.config import DATABASE_URL, MLFLOW_TRACKING_URI
+from src.config import MLFLOW_TRACKING_URI
 from src.data.synthetic_data import load_or_create_dataset
+from src.database import (
+    delete_prediction,
+    get_prediction_history,
+    initialize_prediction_history,
+    save_prediction,
+)
 from src.mlops.mlflow_manager import MLflowManager
 from src.models.predictive_maintenance import PredictiveMaintenanceEngine
 
@@ -32,6 +38,22 @@ class SensorSample(BaseModel):
 class PredictionRequest(BaseModel):
     machine_id: str = Field(..., description="Machine identifier")
     sensor_data: List[SensorSample] = Field(..., min_length=1)
+    save_to_history: bool = Field(default=False)
+
+
+SENSOR_DEFAULT_FIELDS = (
+    "temperature",
+    "pressure",
+    "vibration",
+    "rpm",
+    "voltage",
+    "current",
+    "humidity",
+    "load",
+    "maintenance_history",
+    "failure_log",
+    "operating_hours",
+)
 
 
 app = FastAPI(
@@ -46,6 +68,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 DEFAULT_DATASET = load_or_create_dataset()
 ML_ENGINE = PredictiveMaintenanceEngine(DEFAULT_DATASET)
 MLOPS_MANAGER = MLflowManager(tracking_uri=MLFLOW_TRACKING_URI)
+initialize_prediction_history()
 
 
 @app.get("/dashboard-ui")
@@ -75,11 +98,41 @@ def list_machines() -> Dict[str, Any]:
     return {"machines": machines, "count": len(machines)}
 
 
+@app.get("/machines/{machine_id}/sensor-defaults")
+def machine_sensor_defaults(machine_id: str) -> Dict[str, Any]:
+    machine_records = DEFAULT_DATASET[
+        DEFAULT_DATASET["machine_id"] == machine_id
+    ]
+    if machine_records.empty:
+        raise HTTPException(status_code=404, detail=f"Machine {machine_id} not found")
+    latest = machine_records.iloc[-1]
+    return {
+        field: float(latest[field]) if field != "failure_log" else int(latest[field])
+        for field in SENSOR_DEFAULT_FIELDS
+    }
+
+
 @app.post("/predict")
 def predict_machine(payload: PredictionRequest) -> Dict[str, Any]:
     try:
         sensor_records = [sample.model_dump() for sample in payload.sensor_data]
         prediction = ML_ENGINE.predict_machine(payload.machine_id, sensor_records)
+        if payload.save_to_history:
+            risk_score = float(prediction["risk_score"])
+            prediction["history"] = save_prediction(
+                machine_id=payload.machine_id,
+                input_features=sensor_records[-1],
+                predicted_status=(
+                    "Critical"
+                    if risk_score >= 0.75
+                    else "Warning"
+                    if risk_score >= 0.5
+                    else "Healthy"
+                ),
+                risk_score=risk_score,
+                health_score=float(prediction["health_score"]),
+                recommendation=prediction["recommended_action"],
+            )
         return prediction
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -87,10 +140,33 @@ def predict_machine(payload: PredictionRequest) -> Dict[str, Any]:
 
 @app.get("/dashboard")
 def dashboard_summary() -> Dict[str, Any]:
-    summary = ML_ENGINE.summarize_dashboard(DEFAULT_DATASET)
+    saved_predictions = get_prediction_history(limit=10_000)
+    summary = ML_ENGINE.summarize_dashboard(
+        DEFAULT_DATASET,
+        saved_predictions=saved_predictions,
+    )
     summary["dataset_rows"] = int(len(DEFAULT_DATASET))
     summary["machines_in_scope"] = int(DEFAULT_DATASET["machine_id"].nunique())
+    summary["fleet_health_percent"] = summary["average_health_score"]
+    summary["critical_assets"] = summary["critically_at_risk"]
+    summary["maintenance_queue"] = int(summary.get("maintenance_queue", 0))
     return summary
+
+
+@app.get("/predictions/history")
+def prediction_history(machine_id: Optional[str] = None) -> Dict[str, Any]:
+    predictions = get_prediction_history(machine_id=machine_id, limit=10)
+    return {
+        "predictions": predictions,
+        "count": len(predictions),
+    }
+
+
+@app.delete("/predictions/history/{prediction_id}")
+def delete_prediction_history(prediction_id: int) -> Dict[str, Any]:
+    if not delete_prediction(prediction_id):
+        raise HTTPException(status_code=404, detail="Prediction history record not found")
+    return {"deleted": True, "id": prediction_id}
 
 
 @app.get("/model/metrics")

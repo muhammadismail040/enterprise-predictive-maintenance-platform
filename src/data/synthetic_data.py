@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-
 DEFAULT_DATASET_PATH = Path(__file__).resolve().parents[2] / "data" / "machine_sensor_data.csv"
 
 

@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
 mlflow.db
+local.db
 frontend/node_modules/
 src/static/assets/

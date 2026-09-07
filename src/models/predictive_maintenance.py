@@ -218,20 +218,59 @@ class PredictiveMaintenanceEngine:
         )
         return {"top_risk_factors": ranked, "feature_importance": sorted_importance}
 
-    def summarize_dashboard(self, dataset: pd.DataFrame) -> Dict[str, Any]:
+    def summarize_dashboard(
+        self,
+        dataset: pd.DataFrame,
+        saved_predictions: Iterable[Dict[str, Any]] = (),
+    ) -> Dict[str, Any]:
         if dataset.empty:
             return {"machines": 0, "average_health_score": 0.0, "critically_at_risk": 0, "maintenance_recommendations": {}}
 
-        processed = self._prepare_training_data(dataset)
-        avg_health = float(processed["health_score"].mean()) if "health_score" in processed else 0.0
-        critical = int((processed["health_score"] < 45).sum())
-        recommendations = processed["recommended_action"].value_counts().to_dict()
+        registered_machines = {
+            str(machine_id) for machine_id in dataset["machine_id"].dropna().unique()
+        }
+        latest_predictions = {}
+        for item in saved_predictions:
+            machine_id = str(item.get("machine_id", "")).strip()
+            if machine_id in registered_machines:
+                current = latest_predictions.get(machine_id)
+                item_key = (str(item.get("created_at", "")), int(item.get("id", 0)))
+                current_key = (
+                    (str(current.get("created_at", "")), int(current.get("id", 0)))
+                    if current
+                    else None
+                )
+                if current_key is None or item_key > current_key:
+                    latest_predictions[machine_id] = item
+
+        if not latest_predictions:
+            return {
+                "machines": 0,
+                "average_health_score": 0.0,
+                "critically_at_risk": 0,
+                "maintenance_recommendations": {},
+            }
+
+        health_scores = [
+            float(item["health_score"]) for item in latest_predictions.values()
+        ]
+        statuses = {
+            machine_id: str(item.get("predicted_status", "Healthy"))
+            for machine_id, item in latest_predictions.items()
+        }
+        avg_health = float(np.mean(health_scores))
+        critical = sum(status == "Critical" for status in statuses.values())
+        queue = sum(status in {"Critical", "Warning"} for status in statuses.values())
+        recommendations = pd.Series(
+            item["recommendation"] for item in latest_predictions.values()
+        ).value_counts().to_dict()
 
         return {
-            "machines": processed["machine_id"].nunique(),
+            "machines": len(latest_predictions),
             "average_health_score": round(avg_health, 2),
             "critically_at_risk": critical,
             "maintenance_recommendations": {str(key): int(value) for key, value in recommendations.items()},
+            "maintenance_queue": queue,
         }
 
 
